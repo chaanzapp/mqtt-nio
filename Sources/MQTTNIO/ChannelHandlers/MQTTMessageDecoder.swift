@@ -23,15 +23,17 @@ struct ByteToMQTTMessageDecoder: NIOSingleStepByteToMessageDecoder {
     typealias InboundOut = MQTTPacket
 
     let version: MQTTClient.Version
+    let maximumPacketSize: Int?
 
-    init(version: MQTTClient.Version) {
+    init(version: MQTTClient.Version, maximumPacketSize: Int? = nil) {
         self.version = version
+        self.maximumPacketSize = maximumPacketSize
     }
 
     mutating func decode(buffer: inout ByteBuffer) throws -> MQTTPacket? {
         let origBuffer = buffer
         do {
-            let packet = try MQTTIncomingPacket.read(from: &buffer)
+            let packet = try MQTTIncomingPacket.read(from: &buffer, maximumPacketSize: self.maximumPacketSize)
             let message: MQTTPacket
             switch packet.type {
             case .PUBLISH:

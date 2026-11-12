@@ -38,6 +38,17 @@ final class MQTTAcknowledgementTests: XCTestCase {
         }
     }
 
+    func testNegotiatedPacketLimitIncludesFixedHeader() throws {
+        try self.withPeer(maximumPacketSize: 12) { client in
+            _ = try client.v5.connect().wait()
+            // Topic "test" + packet ID + empty properties + one-byte payload = 12 bytes total.
+            _ = try client.v5.publish(to: "test", payload: ByteBuffer(string: "x"), qos: .atLeastOnce).wait()
+            XCTAssertThrowsError(try client.v5.publish(to: "test", payload: ByteBuffer(string: "xx"), qos: .atLeastOnce).wait()) {
+                XCTAssertEqual($0 as? MQTTPacketError, .packetTooLarge)
+            }
+        }
+    }
+
     func testOneSecondClientKeepAlive() throws {
         try self.checkKeepAlive(clientSeconds: 1, serverSeconds: nil)
     }
@@ -104,6 +115,7 @@ final class MQTTAcknowledgementTests: XCTestCase {
         reason: MQTTReasonCode = .success,
         keepAlive: Int64 = 30,
         serverKeepAlive: UInt16? = nil,
+        maximumPacketSize: UInt32? = nil,
         onPing: @escaping () -> Void = {},
         body: (MQTTClient) throws -> Void
     ) throws {
@@ -111,7 +123,9 @@ final class MQTTAcknowledgementTests: XCTestCase {
         defer { XCTAssertNoThrow(try group.syncShutdownGracefully()) }
         let server = try ServerBootstrap(group: group)
             .childChannelInitializer { channel in
-                channel.pipeline.addHandler(Peer(stage: stage, reason: reason, keepAlive: serverKeepAlive, onPing: onPing))
+                channel.pipeline.addHandler(
+                    Peer(stage: stage, reason: reason, keepAlive: serverKeepAlive, maximumPacketSize: maximumPacketSize, onPing: onPing)
+                )
             }
             .bind(host: "127.0.0.1", port: 0).wait()
         defer { XCTAssertNoThrow(try server.close().wait()) }
@@ -132,13 +146,15 @@ final class MQTTAcknowledgementTests: XCTestCase {
         let stage: MQTTPacketType
         let reason: MQTTReasonCode
         let keepAlive: UInt16?
+        let maximumPacketSize: UInt32?
         let onPing: () -> Void
         var input = ByteBuffer()
 
-        init(stage: MQTTPacketType, reason: MQTTReasonCode, keepAlive: UInt16?, onPing: @escaping () -> Void) {
+        init(stage: MQTTPacketType, reason: MQTTReasonCode, keepAlive: UInt16?, maximumPacketSize: UInt32?, onPing: @escaping () -> Void) {
             self.stage = stage
             self.reason = reason
             self.keepAlive = keepAlive
+            self.maximumPacketSize = maximumPacketSize
             self.onPing = onPing
         }
 
@@ -153,11 +169,17 @@ final class MQTTAcknowledgementTests: XCTestCase {
                     switch packet.type {
                     case .CONNECT:
                         // Independent minimal CONNACK; the client library does not encode CONNACK.
-                        var ack = ByteBuffer(bytes: [0x20, self.keepAlive == nil ? 3 : 6, 0, 0, self.keepAlive == nil ? 0 : 3])
+                        var properties = ByteBuffer()
                         if let keepAlive = self.keepAlive {
-                            ack.writeInteger(UInt8(0x13))
-                            ack.writeInteger(keepAlive)
+                            properties.writeInteger(UInt8(0x13))
+                            properties.writeInteger(keepAlive)
                         }
+                        if let maximum = self.maximumPacketSize {
+                            properties.writeInteger(UInt8(0x27))
+                            properties.writeInteger(maximum)
+                        }
+                        var ack = ByteBuffer(bytes: [0x20, UInt8(3 + properties.readableBytes), 0, 0, UInt8(properties.readableBytes)])
+                        ack.writeBuffer(&properties)
                         context.writeAndFlush(self.wrapOutboundOut(ack), promise: nil)
                     case .PUBLISH:
                         let publish = try MQTTPublishPacket.read(version: .v5_0, from: packet)

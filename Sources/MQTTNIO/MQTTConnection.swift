@@ -41,13 +41,23 @@ final class MQTTConnection {
         self.taskHandler = taskHandler
     }
 
-    static func create(client: MQTTClient, cleanSession: Bool, pingInterval: TimeAmount) -> EventLoopFuture<MQTTConnection> {
+    static func create(
+        client: MQTTClient,
+        cleanSession: Bool,
+        pingInterval: TimeAmount,
+        maximumPacketSize: Int? = nil
+    ) -> EventLoopFuture<MQTTConnection> {
         let taskHandler = MQTTTaskHandler(client: client)
-        return self.createBootstrap(client: client, pingInterval: pingInterval, taskHandler: taskHandler)
+        return self.createBootstrap(client: client, pingInterval: pingInterval, maximumPacketSize: maximumPacketSize, taskHandler: taskHandler)
             .map { MQTTConnection(channel: $0, cleanSession: cleanSession, timeout: client.configuration.timeout, taskHandler: taskHandler) }
     }
 
-    static func createBootstrap(client: MQTTClient, pingInterval: TimeAmount, taskHandler: MQTTTaskHandler) -> EventLoopFuture<Channel> {
+    static func createBootstrap(
+        client: MQTTClient,
+        pingInterval: TimeAmount,
+        maximumPacketSize: Int?,
+        taskHandler: MQTTTaskHandler
+    ) -> EventLoopFuture<Channel> {
         let eventLoop = client.eventLoopGroup.next()
         let channelPromise = eventLoop.makePromise(of: Channel.self)
         do {
@@ -59,7 +69,7 @@ final class MQTTConnection {
                 .channelInitializer { channel in
                     // Work out what handlers to add
                     let handlers: [ChannelHandler] = [
-                        MQTTMessageHandler(client, pingInterval: pingInterval),
+                        MQTTMessageHandler(client, pingInterval: pingInterval, maximumPacketSize: maximumPacketSize),
                         taskHandler,
                     ]
                     // are we using websockets

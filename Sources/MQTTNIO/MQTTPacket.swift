@@ -648,12 +648,16 @@ struct MQTTIncomingPacket: MQTTPacket {
     ///
     /// read fixed header and data attached. Throws incomplete packet error if if cannot read
     /// everything
-    static func read(from byteBuffer: inout ByteBuffer) throws -> MQTTIncomingPacket {
+    static func read(from byteBuffer: inout ByteBuffer, maximumPacketSize: Int? = nil) throws -> MQTTIncomingPacket {
+        let start = byteBuffer.readerIndex
         guard let byte: UInt8 = byteBuffer.readInteger() else { throw InternalError.incompletePacket }
         guard let type = MQTTPacketType(rawValue: byte) ?? MQTTPacketType(rawValue: byte & 0xF0) else {
             throw MQTTError.unrecognisedPacketType
         }
         let length = try MQTTSerializer.readVariableLengthInteger(from: &byteBuffer)
+        if let maximumPacketSize, length + byteBuffer.readerIndex - start > maximumPacketSize {
+            throw MQTTError.packetTooLarge
+        }
         guard let bytes = byteBuffer.readSlice(length: length) else { throw InternalError.incompletePacket }
         return MQTTIncomingPacket(type: type, flags: byte & 0xF, remainingData: bytes)
     }

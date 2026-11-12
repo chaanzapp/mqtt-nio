@@ -58,16 +58,14 @@ enum MQTTSerializer {
     /// read variable length from bytebuffer
     static func readVariableLengthInteger(from byteBuffer: inout ByteBuffer) throws -> Int {
         var value = 0
-        var shift = 0
-        repeat {
+        for shift in stride(from: 0, to: 28, by: 7) {
             guard let byte: UInt8 = byteBuffer.readInteger() else { throw InternalError.incompletePacket }
             value += (Int(byte) & 0x7F) << shift
             if byte & 0x80 == 0 {
-                break
+                return value
             }
-            shift += 7
-        } while true
-        return value
+        }
+        throw MQTTError.decodeError
     }
 
     /// read string from bytebuffer

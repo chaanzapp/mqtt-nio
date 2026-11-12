@@ -485,16 +485,28 @@ extension MQTTClient {
     ) -> EventLoopFuture<MQTTConnAckPacket> {
         let pingInterval = self.configuration.pingInterval ?? Self.pingInterval(keepAliveSeconds: packet.keepAliveSeconds)
         var cleanSession = packet.cleanSession
+        var maximumPacketSize: Int?
         // if connection has non zero session expiry then assume it doesnt clean session on close
         for p in packet.properties {
             // check topic alias
+            if case .maximumPacketSize(let size) = p {
+                guard size > 0, maximumPacketSize == nil else {
+                    return self.eventLoopGroup.next().makeFailedFuture(MQTTPacketError.badParameter)
+                }
+                maximumPacketSize = Int(size)
+            }
             if case .sessionExpiryInterval(let interval) = p {
                 if interval > 0 {
                     cleanSession = false
                 }
             }
         }
-        let connectFuture = MQTTConnection.create(client: self, cleanSession: cleanSession, pingInterval: pingInterval)
+        let connectFuture = MQTTConnection.create(
+            client: self,
+            cleanSession: cleanSession,
+            pingInterval: pingInterval,
+            maximumPacketSize: maximumPacketSize
+        )
         let eventLoop = connectFuture.eventLoop
         return
             connectFuture
@@ -679,6 +691,14 @@ extension MQTTClient {
     ///     - packet: Publish packet
     func publish(packet: MQTTPublishPacket) -> EventLoopFuture<MQTTAckV5?> {
         guard let connection = self.connection else { return self.eventLoopGroup.next().makeFailedFuture(MQTTError.noConnection) }
+
+        if let maximum = self.connectionParameters.maxPacketSize {
+            let remaining = packet.packetSize(version: self.configuration.version)
+            let total = 1 + MQTTSerializer.variableLengthIntegerPacketSize(remaining) + remaining
+            guard total <= maximum else {
+                return self.eventLoopGroup.next().makeFailedFuture(MQTTPacketError.packetTooLarge)
+            }
+        }
 
         // check publish validity
         // check qos against server max qos

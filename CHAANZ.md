@@ -1,7 +1,7 @@
 # Chaanz MQTTNIO fork
 
 Branch `chaanz/2.13-fixes` is based on upstream **2.13.0**. It retains that release's
-Swift toolchain requirements and adds two focused fixes:
+Swift toolchain requirements and adds focused fixes:
 
 - Negative PUBACK, PUBREC and PUBCOMP responses throw
   `MQTTError.publishError(MQTTAckV5)`, preserving the reason code, Reason String and
@@ -12,12 +12,19 @@ Swift toolchain requirements and adds two focused fixes:
   A broker's Server Keep Alive replaces the pending timer immediately. Zero stops
   automatic pings, and stale completions cannot restart an old timer.
 
+- CONNECT Maximum Packet Size caps incoming packets as soon as their fixed header
+  arrives, before buffering the body. Oversized packets close the connection with
+  `MQTTError.packetTooLarge`. Broker Maximum Packet Size rejects oversized publishes
+  locally with `MQTTPacketError.packetTooLarge`, including the complete fixed header
+  in the size calculation. Remaining Length rejects encodings longer than four bytes.
+
 `MQTTAcknowledgementTests` uses a local TCP peer to cover error metadata, positive
-acknowledgements, unknown reason handling, and client/server keepalive negotiation.
+acknowledgements, unknown reason handling, client/server keepalive negotiation, and negotiated publish limits.
+`MQTTPacketLimitTests` covers bounded decoding and fragmented headers.
 It runs without an external broker:
 
 ```sh
-swift test --filter MQTTAcknowledgementTests
+swift test --filter 'MQTT(Acknowledgement|PacketLimit)Tests'
 ```
 
 The full upstream suite additionally needs the broker configuration documented in
@@ -28,6 +35,6 @@ those test credentials outside the test broker.
 This fork does not change the b.sure contract or receiver. Integrating it into
 Analytics still requires the sender/receiver interoperability checks.
 
-Validated on Linux with Swift 6.0.3 and Mosquitto 2.0.18: all 76 tests pass,
-including 10 new regressions. The three negative-acknowledgement tests fail against
+Validated on Linux with Swift 6.0.3 and Mosquitto 2.0.18: all 81 tests pass,
+including 15 new regressions. The three negative-acknowledgement tests fail against
 the original implementation and pass with the patch.

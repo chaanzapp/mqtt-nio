@@ -24,14 +24,14 @@ class MQTTMessageHandler: ChannelDuplexHandler {
     let pingreqHandler: PingreqHandler?
     var decoder: NIOSingleStepByteToMessageProcessor<ByteToMQTTMessageDecoder>
 
-    init(_ client: MQTTClient, pingInterval: TimeAmount) {
+    init(_ client: MQTTClient, pingInterval: TimeAmount, maximumPacketSize: Int? = nil) {
         self.client = client
         if client.configuration.disablePing {
             self.pingreqHandler = nil
         } else {
             self.pingreqHandler = .init(client: client, timeout: pingInterval)
         }
-        self.decoder = .init(.init(version: client.configuration.version))
+        self.decoder = .init(.init(version: client.configuration.version, maximumPacketSize: maximumPacketSize))
     }
 
     func handlerAdded(context: ChannelHandlerContext) {
