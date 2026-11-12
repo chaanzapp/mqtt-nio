@@ -114,8 +114,8 @@ class MQTTMessageHandler: ChannelDuplexHandler {
         }
     }
 
-    func updatePingreqTimeout(_ timeout: TimeAmount) {
-        self.pingreqHandler?.updateTimeout(timeout)
+    func updatePingreqTimeout(_ timeout: TimeAmount, context: ChannelHandlerContext) {
+        self.pingreqHandler?.updateTimeout(timeout, context: context)
     }
 
     /// Respond to PUBLISH message

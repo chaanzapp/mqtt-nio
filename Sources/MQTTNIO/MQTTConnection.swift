@@ -223,8 +223,9 @@ final class MQTTConnection {
     }
 
     func updatePingreqTimeout(_ timeout: TimeAmount) {
-        self.channel.pipeline.handler(type: MQTTMessageHandler.self).whenSuccess { handler in
-            handler.updatePingreqTimeout(timeout)
+        self.channel.pipeline.context(handlerType: MQTTMessageHandler.self).whenSuccess { context in
+            let handler = context.handler as! MQTTMessageHandler
+            handler.updatePingreqTimeout(timeout, context: context)
         }
     }
 

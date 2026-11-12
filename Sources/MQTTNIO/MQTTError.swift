@@ -39,8 +39,10 @@ public enum MQTTError: Error {
     case failedToConnect
     /// We received an unsuccessful connection return value
     case connectionError(ConnectionReturnValue)
-    /// We received an unsuccessful return value from either a connect or publish
+    /// We received an unsuccessful return value from a connect
     case reasonError(MQTTReasonCode)
+    /// A publish acknowledgement failed; includes its Reason String and User Properties.
+    case publishError(MQTTAckV5)
     /// client in not connected
     case noConnection
     /// the server disconnected

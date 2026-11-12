@@ -24,6 +24,7 @@ final class PingreqHandler {
     var timeout: TimeAmount
     var lastEventTime: NIODeadline
     var task: Scheduled<Void>?
+    private var generation: UInt64 = 0
 
     init(client: MQTTClient, timeout: TimeAmount) {
         self.client = client
@@ -32,8 +33,10 @@ final class PingreqHandler {
         self.task = nil
     }
 
-    func updateTimeout(_ timeout: TimeAmount) {
+    func updateTimeout(_ timeout: TimeAmount, context: ChannelHandlerContext) {
+        self.stop()
         self.timeout = timeout
+        self.start(context: context)
     }
 
     func start(context: ChannelHandlerContext) {
@@ -42,6 +45,7 @@ final class PingreqHandler {
     }
 
     func stop() {
+        self.generation &+= 1
         self.task?.cancel()
         self.task = nil
     }
@@ -51,15 +55,18 @@ final class PingreqHandler {
     }
 
     func scheduleTask(_ context: ChannelHandlerContext) {
-        guard context.channel.isActive else { return }
+        guard context.channel.isActive, self.timeout.nanoseconds > 0 else { return }
+        let generation = self.generation
 
         self.task = context.eventLoop.scheduleTask(deadline: self.lastEventTime + self.timeout) {
+            guard generation == self.generation else { return }
             // if lastEventTime plus the timeout is less than now send PINGREQ
             // otherwise reschedule task
             if self.lastEventTime + self.timeout <= .now() {
                 guard context.channel.isActive else { return }
 
                 self.client.ping().whenComplete { result in
+                    guard generation == self.generation else { return }
                     switch result {
                     case .failure(let error):
                         context.fireErrorCaught(error)

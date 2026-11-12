@@ -471,12 +471,19 @@ public final class MQTTClient {
 }
 
 extension MQTTClient {
+    /// Zero disables automatic pings; shorter nonzero intervals must not underflow
+    /// or schedule a ping later than the negotiated keepalive.
+    private static func pingInterval(keepAliveSeconds: UInt16) -> TimeAmount {
+        guard keepAliveSeconds > 0 else { return .seconds(0) }
+        return .seconds(max(Int64(keepAliveSeconds) - 5, 1))
+    }
+
     /// connect to broker
     func connect(
         packet: MQTTConnectPacket,
         authWorkflow: ((MQTTAuthV5, EventLoop) -> EventLoopFuture<MQTTAuthV5>)? = nil
     ) -> EventLoopFuture<MQTTConnAckPacket> {
-        let pingInterval = self.configuration.pingInterval ?? TimeAmount.seconds(max(Int64(packet.keepAliveSeconds - 5), 5))
+        let pingInterval = self.configuration.pingInterval ?? Self.pingInterval(keepAliveSeconds: packet.keepAliveSeconds)
         var cleanSession = packet.cleanSession
         // if connection has non zero session expiry then assume it doesnt clean session on close
         for p in packet.properties {
@@ -585,7 +592,7 @@ extension MQTTClient {
             // alter pingreq interval based on session expiry returned from server
             if let connection = self.connection {
                 if case .serverKeepAlive(let keepAliveInterval) = property {
-                    let pingTimeout = TimeAmount.seconds(max(Int64(keepAliveInterval - 5), 5))
+                    let pingTimeout = Self.pingInterval(keepAliveSeconds: keepAliveInterval)
                     connection.updatePingreqTimeout(pingTimeout)
                 }
             }
@@ -718,7 +725,7 @@ extension MQTTClient {
             }
             if let pubAckPacket = message as? MQTTPubAckPacket {
                 if pubAckPacket.reason.rawValue > 0x7F {
-                    throw MQTTError.reasonError(pubAckPacket.reason)
+                    throw MQTTError.publishError(MQTTAckV5(reason: pubAckPacket.reason, properties: pubAckPacket.properties))
                 }
             }
             return true
@@ -756,7 +763,7 @@ extension MQTTClient {
             }
             if let pubAckPacket = message as? MQTTPubAckPacket {
                 if pubAckPacket.reason.rawValue > 0x7F {
-                    throw MQTTError.reasonError(pubAckPacket.reason)
+                    throw MQTTError.publishError(MQTTAckV5(reason: pubAckPacket.reason, properties: pubAckPacket.properties))
                 }
             }
             return true
