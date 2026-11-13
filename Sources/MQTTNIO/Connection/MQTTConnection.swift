@@ -54,6 +54,9 @@ public final actor MQTTConnection: Sendable {
     let commonSubscribeSpanAttributes: SpanAttributes
     #endif
 
+    /// The successful CONNACK, including negotiated limits needed by caller-owned queues.
+    public private(set) var connectAcknowledgement: MQTTConnackV5?
+
     var connectionParameters = ConnectionParameters()
 
     /// Initialize connection
@@ -930,7 +933,7 @@ public final actor MQTTConnection: Sendable {
         for property in connack.properties.properties {
             // alter pingreq interval based on session expiry returned from server
             if case .serverKeepAlive(let keepAliveInterval) = property {
-                let pingTimeout = TimeAmount.seconds(max(Int64(keepAliveInterval - 5), 5))
+                let pingTimeout: TimeAmount? = keepAliveInterval == 0 ? nil : .seconds(max(Int64(keepAliveInterval) - 5, 1))
                 self.channelHandler.updatePingreqTimeout(pingTimeout)
             }
             // client identifier
@@ -954,6 +957,11 @@ public final actor MQTTConnection: Sendable {
                 self.connectionParameters.maxTopicAlias = max
             }
         }
+        self.connectAcknowledgement = MQTTConnackV5(
+            sessionPresent: connack.sessionPresent,
+            reason: MQTTReasonCode(rawValue: connack.returnCode) ?? .unrecognisedReason,
+            properties: connack.properties
+        )
         return connack
     }
 

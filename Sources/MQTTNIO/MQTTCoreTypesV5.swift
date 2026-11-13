@@ -7,7 +7,7 @@
 //
 
 /// MQTT v5 Connack
-struct MQTTConnackV5: Sendable {
+public struct MQTTConnackV5: Sendable {
     /// is using session state from previous session
     public var sessionPresent: Bool
     /// connect reason code
