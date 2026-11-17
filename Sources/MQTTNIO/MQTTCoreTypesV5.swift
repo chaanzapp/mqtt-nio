@@ -6,8 +6,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-/// MQTT v5 Connack
-struct MQTTConnackV5: Sendable {
+/// Connection acknowledgement information, including MQTT 5 negotiated properties.
+public struct MQTTConnackV5: Sendable {
     /// is using session state from previous session
     public var sessionPresent: Bool
     /// connect reason code

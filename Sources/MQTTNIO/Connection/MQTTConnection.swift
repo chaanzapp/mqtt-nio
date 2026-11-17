@@ -54,6 +54,12 @@ public final actor MQTTConnection: Sendable {
     let commonSubscribeSpanAttributes: SpanAttributes
     #endif
 
+    /// The successful connection acknowledgement, available when the connection closure begins.
+    ///
+    /// MQTT 3.1.1 acknowledgements have an empty properties collection and a success reason.
+    /// The value is nil until a successful CONNACK is processed, including after enhanced authentication.
+    public private(set) var connectAcknowledgement: MQTTConnackV5?
+
     var connectionParameters = ConnectionParameters()
 
     /// Initialize connection
@@ -833,25 +839,28 @@ public final actor MQTTConnection: Sendable {
         }
 
         // process connack or auth messages
+        let connack: MQTTConnAckPacket
         switch message {
-        case let connack as MQTTConnAckPacket:
-            if connack.sessionPresent {
-                try await self.resendOnRestart()
-            } else {
-                self.channelHandler.session.inflight.clear()
-            }
-            let ack = try self.processConnack(connack)
-            return ack
+        case let acknowledgement as MQTTConnAckPacket:
+            connack = acknowledgement
         case let auth as MQTTAuthPacket:
             // auth messages require an auth workflow closure
             guard let authWorkflow else { throw MQTTError.authWorkflowRequired }
             let result = try await self.processAuth(auth, authWorkflow: authWorkflow)
             // once auth workflow is finished we should receive a connack
             guard let connAckPacket = result as? MQTTConnAckPacket else { throw MQTTError.unexpectedPacket }
-            return connAckPacket
+            connack = connAckPacket
         default:
             throw MQTTError.unexpectedPacket
         }
+        // Both connection paths validate and apply negotiated properties before replaying a session.
+        let ack = try self.processConnack(connack)
+        if connack.sessionPresent {
+            try await self.resendOnRestart()
+        } else {
+            self.channelHandler.session.inflight.clear()
+        }
+        return ack
     }
 
     func sendPacketNoWait(_ packet: any MQTTPacket) throws {
@@ -958,6 +967,11 @@ public final actor MQTTConnection: Sendable {
                 self.channelHandler.subscriptionIdentifiersAvailable = value != 0
             }
         }
+        self.connectAcknowledgement = MQTTConnackV5(
+            sessionPresent: connack.sessionPresent,
+            reason: MQTTReasonCode(rawValue: connack.returnCode) ?? .unrecognisedReason,
+            properties: connack.properties
+        )
         return connack
     }
 
