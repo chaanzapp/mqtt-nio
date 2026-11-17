@@ -833,25 +833,28 @@ public final actor MQTTConnection: Sendable {
         }
 
         // process connack or auth messages
+        let connack: MQTTConnAckPacket
         switch message {
-        case let connack as MQTTConnAckPacket:
-            if connack.sessionPresent {
-                try await self.resendOnRestart()
-            } else {
-                self.channelHandler.session.inflight.clear()
-            }
-            let ack = try self.processConnack(connack)
-            return ack
+        case let packet as MQTTConnAckPacket:
+            connack = packet
         case let auth as MQTTAuthPacket:
             // auth messages require an auth workflow closure
             guard let authWorkflow else { throw MQTTError.authWorkflowRequired }
             let result = try await self.processAuth(auth, authWorkflow: authWorkflow)
             // once auth workflow is finished we should receive a connack
             guard let connAckPacket = result as? MQTTConnAckPacket else { throw MQTTError.unexpectedPacket }
-            return connAckPacket
+            connack = connAckPacket
         default:
             throw MQTTError.unexpectedPacket
         }
+        // Validate and apply negotiated settings before restoring either authentication path's session.
+        let ack = try self.processConnack(connack)
+        if ack.sessionPresent {
+            try await self.resendOnRestart()
+        } else {
+            self.channelHandler.session.inflight.clear()
+        }
+        return ack
     }
 
     func sendPacketNoWait(_ packet: any MQTTPacket) throws {
@@ -888,25 +891,51 @@ public final actor MQTTConnection: Sendable {
     func resendOnRestart() async throws {
         let inflight = self.channelHandler.session.inflight.packets
         self.channelHandler.session.inflight.clear()
-        for packet in inflight {
-            switch packet {
-            case let publish as MQTTPublishPacket:
-                let newPacket = MQTTPublishPacket(
-                    publish: .init(
-                        qos: publish.publish.qos,
-                        retain: publish.publish.retain,
-                        dup: true,
-                        topicName: publish.publish.topicName,
-                        payload: publish.publish.payload,
-                        properties: publish.publish.properties
-                    ),
-                    packetId: publish.packetId
-                )
-                _ = try await self.publish(packet: newPacket)
-            case let pubRel as MQTTPubAckPacket:
-                _ = try await self.pubRel(packet: pubRel)
-            default:
-                break
+        for (index, packet) in inflight.enumerated() {
+            do {
+                switch packet {
+                case let publish as MQTTPublishPacket:
+                    let newPacket = MQTTPublishPacket(
+                        publish: .init(
+                            qos: publish.publish.qos,
+                            retain: publish.publish.retain,
+                            dup: true,
+                            topicName: publish.publish.topicName,
+                            payload: publish.publish.payload,
+                            properties: publish.publish.properties
+                        ),
+                        packetId: publish.packetId
+                    )
+                    _ = try await self.publish(packet: newPacket)
+                case let pubRel as MQTTPubAckPacket:
+                    _ = try await self.pubRel(packet: pubRel)
+                default:
+                    break
+                }
+            } catch {
+                switch error {
+                case MQTTPacketError.qosInvalid, MQTTPacketError.retainUnavailable, MQTTError.packetTooLarge:
+                    if !self.channelHandler.stateMachine.isClosed() {
+                        self.channelHandler.session.inflight.remove(id: packet.packetId)
+                        self.logger.warning(
+                            "Discarding in-flight packet rejected by negotiated broker limits",
+                            metadata: ["mqtt_packet_id": .stringConvertible(packet.packetId), "mqtt_error": .string("\(error)")]
+                        )
+                        continue
+                    }
+                    fallthrough
+                default:
+                    // Preflight validation may fail before publish re-adds the current packet.
+                    if error is MQTTPacketError,
+                        !self.channelHandler.session.inflight.packets.contains(where: { $0.packetId == packet.packetId })
+                    {
+                        self.channelHandler.session.inflight.add(packet: packet)
+                    }
+                    for pending in inflight.dropFirst(index + 1) {
+                        self.channelHandler.session.inflight.add(packet: pending)
+                    }
+                    throw error
+                }
             }
         }
     }
