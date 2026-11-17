@@ -833,25 +833,28 @@ public final actor MQTTConnection: Sendable {
         }
 
         // process connack or auth messages
+        let connack: MQTTConnAckPacket
         switch message {
-        case let connack as MQTTConnAckPacket:
-            if connack.sessionPresent {
-                try await self.resendOnRestart()
-            } else {
-                self.channelHandler.session.inflight.clear()
-            }
-            let ack = try self.processConnack(connack)
-            return ack
+        case let packet as MQTTConnAckPacket:
+            connack = packet
         case let auth as MQTTAuthPacket:
             // auth messages require an auth workflow closure
             guard let authWorkflow else { throw MQTTError.authWorkflowRequired }
             let result = try await self.processAuth(auth, authWorkflow: authWorkflow)
             // once auth workflow is finished we should receive a connack
             guard let connAckPacket = result as? MQTTConnAckPacket else { throw MQTTError.unexpectedPacket }
-            return connAckPacket
+            connack = connAckPacket
         default:
             throw MQTTError.unexpectedPacket
         }
+        // Validate and apply negotiated settings before restoring either authentication path's session.
+        let ack = try self.processConnack(connack)
+        if ack.sessionPresent {
+            try await self.resendOnRestart()
+        } else {
+            self.channelHandler.session.inflight.clear()
+        }
+        return ack
     }
 
     func sendPacketNoWait(_ packet: any MQTTPacket) throws {
@@ -929,8 +932,10 @@ public final actor MQTTConnection: Sendable {
 
         for property in connack.properties.properties {
             // Apply the negotiated keepalive before scheduling the next ping.
-            if case .serverKeepAlive(let keepAliveInterval) = property {
-                let pingTimeout: TimeAmount? = keepAliveInterval == 0 ? nil : .seconds(max(Int64(keepAliveInterval) - 5, 1))
+            if case .serverKeepAlive(let keepAliveInterval) = property,
+                case .useServerKeepAlive = self.configuration.pingConfiguration.base
+            {
+                let pingTimeout = self.configuration.pingConfiguration.interval(keepAliveSeconds: Int64(keepAliveInterval))
                 self.channelHandler.updatePingreqTimeout(pingTimeout)
             }
             // client identifier

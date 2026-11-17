@@ -233,6 +233,18 @@ public struct MQTTConnectionConfiguration: Sendable {
 
         /// Disable the automatic sending of `PINGREQ` messages.
         public static var disable: Self { .init(base: .disable) }
+
+        /// Derive the timer from the whole seconds encoded in CONNECT or received in CONNACK.
+        func interval(keepAliveSeconds: Int64) -> TimeAmount? {
+            switch self.base {
+            case .useServerKeepAlive:
+                keepAliveSeconds > 0 ? .seconds(max(keepAliveSeconds - 5, 1)) : nil
+            case .pingInterval(let interval):
+                .init(interval)
+            case .disable:
+                nil
+            }
+        }
     }
 
     /// Connection configuration for the version of MQTT server to connect to.

@@ -99,6 +99,12 @@ extension MQTTChannelHandler {
         struct InitializedState {
             let context: Context
             var tasks: MQTTTasks
+            var pingState: PingState = .idle
+
+            enum PingState {
+                case idle
+                case waitingForResponse
+            }
 
             mutating func cancel(requestID: Int) -> MQTTTask? {
                 self.tasks.removeFirst {
@@ -288,13 +294,44 @@ extension MQTTChannelHandler {
         mutating func schedulePingReq() -> SchedulePingReqAction {
             switch consume self.state {
             case .uninitialized:
-                preconditionFailure("Cannot schedule PINGREQ when uninitialized")
+                self = .uninitialized
+                return .doNothing
             case .initialized(let state):
+                let action: SchedulePingReqAction =
+                    switch state.pingState {
+                    case .idle: .schedule(state.context)
+                    case .waitingForResponse: .doNothing
+                    }
                 self = .initialized(state)
-                return .schedule(state.context)
+                return action
             case .closed:
                 self = .closed
                 return .doNothing
+            }
+        }
+
+        /// Mark the automatic ping as outstanding before writing it to the channel.
+        mutating func pingReqSent() {
+            switch consume self.state {
+            case .initialized(var state):
+                state.pingState = .waitingForResponse
+                self = .initialized(state)
+            case .uninitialized:
+                self = .uninitialized
+            case .closed:
+                self = .closed
+            }
+        }
+
+        mutating func pingResponseReceived() {
+            switch consume self.state {
+            case .initialized(var state):
+                state.pingState = .idle
+                self = .initialized(state)
+            case .uninitialized:
+                self = .uninitialized
+            case .closed:
+                self = .closed
             }
         }
 
