@@ -56,7 +56,6 @@ final class MQTTChannelHandler: ChannelDuplexHandler {
     private var pingreqTimeout: TimeAmount?
     private var lastPingreqEventTime: NIODeadline
     private var pingreqCallback: NIOScheduledCallback?
-    private var waitingForPingResponse = false
 
     /// The Maximum Packet Size for this Server.
     var maxPacketSize: UInt32 = .max
@@ -86,6 +85,7 @@ final class MQTTChannelHandler: ChannelDuplexHandler {
 
     private func setInitialized(context: ChannelHandlerContext) {
         self.stateMachine.setInitialized(context: context)
+        guard self.pingreqCallback == nil else { return }
         self.schedulePingreqCallback()
     }
 
@@ -112,6 +112,9 @@ final class MQTTChannelHandler: ChannelDuplexHandler {
     }
 
     func channelInactive(context: ChannelHandlerContext) {
+        self.pingreqCallback?.cancel()
+        self.pingreqCallback = nil
+
         // channel is inactive so we should fail all tasks in progress
         self.failTasksAndCloseSubscriptions(with: MQTTError.serverClosedConnection)
         self.logger.trace("Channel became inactive.")
@@ -188,8 +191,8 @@ final class MQTTChannelHandler: ChannelDuplexHandler {
         self.eventLoop.assertInEventLoop()
         switch self.stateMachine.cancel(requestID: requestID) {
         case .failTask(let cancelledTask, let deadlineAction):
-            self.processDeadlineCallbackAction(action: deadlineAction)
             cancelledTask.promise.fail(error)
+            self.processDeadlineCallbackAction(action: deadlineAction)
         case .doNothing:
             break
         }
@@ -450,7 +453,6 @@ final class MQTTChannelHandler: ChannelDuplexHandler {
     }
 
     private func failTasksAndCloseSubscriptions(with error: any Error) {
-        self.cancelPingreqCallback()
         switch self.stateMachine.close() {
         case .failTasksAndClose(let tasks):
             for task in tasks {
@@ -458,7 +460,6 @@ final class MQTTChannelHandler: ChannelDuplexHandler {
             }
             self.session.subscriptions.close(error: error)
             self.deadlineCallback?.cancel()
-            self.deadlineCallback = nil
         case .doNothing:
             break
         }
@@ -488,41 +489,36 @@ final class MQTTChannelHandler: ChannelDuplexHandler {
 
     struct MQTTPingreqSchedule: NIOScheduledCallbackHandler {
         let channelHandler: NIOLoopBound<MQTTChannelHandler>
+        let pingreqTimeout: TimeAmount
 
         func handleScheduledCallback(eventLoop: some EventLoop) {
             let channelHandler = self.channelHandler.value
-            guard !channelHandler.waitingForPingResponse else { return }
-            // A cancelled callback may already be queued by the event loop. Replace
-            // any current timer and re-evaluate the current interval and ping state.
-            channelHandler.cancelPingreqCallback()
             switch channelHandler.stateMachine.schedulePingReq() {
             case .doNothing:
                 break
             case .schedule(let context):
-                guard let pingreqTimeout = channelHandler.pingreqTimeout, pingreqTimeout.nanoseconds > 0 else { return }
-                // Outbound traffic postpones the ping; a PINGRESP does not.
+                // if lastEventTime plus the timeout is less than now send PINGREQ
+                // otherwise reschedule task
                 if channelHandler.lastPingreqEventTime + pingreqTimeout <= eventLoop.now {
                     guard context.channel.isActive else { return }
-                    channelHandler.waitingForPingResponse = true
                     channelHandler.sendMessage(
                         MQTTPingreqPacket(),
                         requestID: MQTTConnection.requestIDGenerator.next()
                     ) { message in
-                        message.type == .PINGRESP
+                        guard message.type == .PINGRESP else { return false }
+                        return true
                     }
                     .assumeIsolated()
                     .whenComplete { result in
                         switch result {
                         case .failure(let error):
-                            // Closing the connection already fails outstanding requests.
-                            guard !channelHandler.stateMachine.isClosed() else { return }
                             channelHandler.failTasksAndCloseSubscriptions(with: error)
                             context.fireErrorCaught(error)
-                            context.close(promise: nil)
                         case .success:
-                            channelHandler.waitingForPingResponse = false
-                            channelHandler.schedulePingreqCallback()
+                            break
                         }
+                        channelHandler.lastPingreqEventTime = eventLoop.now
+                        channelHandler.schedulePingreqCallback()
                     }
                 } else {
                     channelHandler.schedulePingreqCallback()
@@ -531,28 +527,15 @@ final class MQTTChannelHandler: ChannelDuplexHandler {
         }
     }
 
-    func updatePingreqTimeout(_ timeout: TimeAmount?) {
+    func updatePingreqTimeout(_ timeout: TimeAmount) {
         self.pingreqTimeout = timeout
-        self.schedulePingreqCallback()
-    }
-
-    private func cancelPingreqCallback() {
-        self.pingreqCallback?.cancel()
-        self.pingreqCallback = nil
     }
 
     func schedulePingreqCallback() {
-        self.cancelPingreqCallback()
-        guard !self.waitingForPingResponse, let pingreqTimeout = self.pingreqTimeout, pingreqTimeout.nanoseconds > 0 else { return }
-        // An interval change cannot send another ping while a response is pending,
-        // or start the timer before the channel becomes active.
-        switch self.stateMachine.schedulePingReq() {
-        case .doNothing:
-            break
-        case .schedule:
+        if let pingreqTimeout = self.pingreqTimeout {
             self.pingreqCallback = try? self.eventLoop.scheduleCallback(
                 at: self.lastPingreqEventTime + pingreqTimeout,
-                handler: MQTTPingreqSchedule(channelHandler: .init(self, eventLoop: self.eventLoop))
+                handler: MQTTPingreqSchedule(channelHandler: .init(self, eventLoop: self.eventLoop), pingreqTimeout: pingreqTimeout)
             )
         }
     }
