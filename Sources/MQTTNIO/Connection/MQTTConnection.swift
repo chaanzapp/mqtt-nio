@@ -932,7 +932,7 @@ public final actor MQTTConnection: Sendable {
             if case .serverKeepAlive(let keepAliveInterval) = property,
                 case .useServerKeepAlive = self.configuration.pingConfiguration.base
             {
-                let pingTimeout = self.configuration.pingConfiguration.interval(keepAliveSeconds: Int64(keepAliveInterval))
+                let pingTimeout: TimeAmount? = keepAliveInterval == 0 ? nil : .seconds(max(Int64(keepAliveInterval) - 5, 1))
                 self.channelHandler.updatePingreqTimeout(pingTimeout)
             }
             // client identifier
