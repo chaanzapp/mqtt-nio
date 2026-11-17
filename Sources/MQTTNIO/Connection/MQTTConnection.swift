@@ -833,28 +833,25 @@ public final actor MQTTConnection: Sendable {
         }
 
         // process connack or auth messages
-        let connack: MQTTConnAckPacket
         switch message {
-        case let packet as MQTTConnAckPacket:
-            connack = packet
+        case let connack as MQTTConnAckPacket:
+            if connack.sessionPresent {
+                try await self.resendOnRestart()
+            } else {
+                self.channelHandler.session.inflight.clear()
+            }
+            let ack = try self.processConnack(connack)
+            return ack
         case let auth as MQTTAuthPacket:
             // auth messages require an auth workflow closure
             guard let authWorkflow else { throw MQTTError.authWorkflowRequired }
             let result = try await self.processAuth(auth, authWorkflow: authWorkflow)
             // once auth workflow is finished we should receive a connack
             guard let connAckPacket = result as? MQTTConnAckPacket else { throw MQTTError.unexpectedPacket }
-            connack = connAckPacket
+            return connAckPacket
         default:
             throw MQTTError.unexpectedPacket
         }
-        // Validate and apply negotiated settings before restoring either authentication path's session.
-        let ack = try self.processConnack(connack)
-        if ack.sessionPresent {
-            try await self.resendOnRestart()
-        } else {
-            self.channelHandler.session.inflight.clear()
-        }
-        return ack
     }
 
     func sendPacketNoWait(_ packet: any MQTTPacket) throws {

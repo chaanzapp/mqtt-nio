@@ -111,9 +111,6 @@ final class MQTTChannelHandler: ChannelDuplexHandler {
     }
 
     func channelInactive(context: ChannelHandlerContext) {
-        self.pingreqCallback?.cancel()
-        self.pingreqCallback = nil
-
         // channel is inactive so we should fail all tasks in progress
         self.failTasksAndCloseSubscriptions(with: MQTTError.serverClosedConnection)
         self.logger.trace("Channel became inactive.")
@@ -452,8 +449,7 @@ final class MQTTChannelHandler: ChannelDuplexHandler {
     }
 
     private func failTasksAndCloseSubscriptions(with error: any Error) {
-        self.pingreqCallback?.cancel()
-        self.pingreqCallback = nil
+        self.cancelPingreqCallback()
         switch self.stateMachine.close() {
         case .failTasksAndClose(let tasks):
             for task in tasks {
@@ -496,8 +492,7 @@ final class MQTTChannelHandler: ChannelDuplexHandler {
             let channelHandler = self.channelHandler.value
             // A cancelled callback may already be queued by the event loop. Replace
             // any current timer and re-evaluate the current interval and ping state.
-            channelHandler.pingreqCallback?.cancel()
-            channelHandler.pingreqCallback = nil
+            channelHandler.cancelPingreqCallback()
             switch channelHandler.stateMachine.schedulePingReq() {
             case .doNothing:
                 break
@@ -535,16 +530,18 @@ final class MQTTChannelHandler: ChannelDuplexHandler {
     }
 
     func updatePingreqTimeout(_ timeout: TimeAmount?) {
-        self.pingreqCallback?.cancel()
-        self.pingreqCallback = nil
         self.pingreqTimeout = timeout
         self.schedulePingreqCallback()
     }
 
+    private func cancelPingreqCallback() {
+        self.pingreqCallback?.cancel()
+        self.pingreqCallback = nil
+    }
+
     func schedulePingreqCallback() {
-        guard self.pingreqCallback == nil,
-            let pingreqTimeout = self.pingreqTimeout, pingreqTimeout.nanoseconds > 0
-        else { return }
+        self.cancelPingreqCallback()
+        guard let pingreqTimeout = self.pingreqTimeout, pingreqTimeout.nanoseconds > 0 else { return }
         // An interval change cannot send another ping while a response is pending,
         // or start the timer before the channel becomes active.
         switch self.stateMachine.schedulePingReq() {

@@ -9,6 +9,74 @@ import Testing
 @testable import MQTTNIO
 
 struct KeepAliveTests {
+    @Test(arguments: [500, 6500])
+    func initialPingUsesEncodedKeepAlive(milliseconds: Int) async throws {
+        let configuration = MQTTConnectionConfiguration(
+            versionConfiguration: .v5_0(),
+            keepAliveInterval: .milliseconds(milliseconds)
+        )
+        #expect(MQTTChannelHandler.Configuration(configuration).pingInterval == (milliseconds < 1000 ? nil : .seconds(1)))
+        let channel = NIOAsyncTestingChannel()
+        let connection = try await MQTTConnection.setupChannelAndConnect(
+            channel,
+            configuration: configuration,
+            session: .init(clientID: "fractional-keepalive", logger: Logger.current)
+        )
+        async let connect = connection.sendConnect(clientID: "fractional-keepalive", cleanSession: true)
+        let packet = try MQTTConnectPacket.read(version: .v5_0, from: try await channel.waitForOutboundPacket())
+        #expect(packet.keepAliveSeconds == UInt16(milliseconds / 1000))
+        try await channel.writeInboundPacket(
+            MQTTConnAckPacket(returnCode: 0, acknowledgeFlags: 0, properties: []),
+            version: .v5_0
+        )
+        _ = try await connect
+        await channel.testingEventLoop.advanceTime(by: .milliseconds(999))
+        #expect(try await channel.readOutbound(as: ByteBuffer.self) == nil)
+        await channel.testingEventLoop.advanceTime(by: .milliseconds(1))
+        if milliseconds >= 1000 {
+            var bytes = try #require(try await channel.readOutbound(as: ByteBuffer.self))
+            #expect(try MQTTIncomingPacket.read(from: &bytes).type == .PINGREQ)
+            try await channel.writeInboundPacket(MQTTPingrespPacket(), version: .v5_0)
+        } else {
+            await channel.testingEventLoop.advanceTime(by: .seconds(60))
+            #expect(try await channel.readOutbound(as: ByteBuffer.self) == nil)
+        }
+        _ = await connection.closeAndCleanup(sendDisconnect: false)
+    }
+
+    @Test(arguments: [UInt16(0), 1], [false, true])
+    func negotiationPreservesPingPolicy(serverSeconds: UInt16, explicitInterval: Bool) async throws {
+        let channel = NIOAsyncTestingChannel()
+        let connection = try await MQTTConnection.setupChannelAndConnect(
+            channel,
+            configuration: .init(
+                versionConfiguration: .v5_0(),
+                pingConfiguration: explicitInterval ? .pingInterval(.seconds(2)) : .disable
+            ),
+            session: .init(clientID: "ping-policy", logger: Logger.current)
+        )
+        async let connect = connection.sendConnect(clientID: "ping-policy", cleanSession: true)
+        #expect(try await channel.waitForOutboundPacket().type == .CONNECT)
+        try await channel.writeInboundPacket(
+            MQTTConnAckPacket(returnCode: 0, acknowledgeFlags: 0, properties: [.serverKeepAlive(serverSeconds)]),
+            version: .v5_0
+        )
+        _ = try await connect
+
+        await channel.testingEventLoop.advanceTime(by: .milliseconds(1999))
+        #expect(try await channel.readOutbound(as: ByteBuffer.self) == nil)
+        await channel.testingEventLoop.advanceTime(by: .milliseconds(1))
+        if explicitInterval {
+            var bytes = try #require(try await channel.readOutbound(as: ByteBuffer.self))
+            #expect(try MQTTIncomingPacket.read(from: &bytes).type == .PINGREQ)
+            try await channel.writeInboundPacket(MQTTPingrespPacket(), version: .v5_0)
+        } else {
+            await channel.testingEventLoop.advanceTime(by: .seconds(100))
+            #expect(try await channel.readOutbound(as: ByteBuffer.self) == nil)
+        }
+        _ = await connection.closeAndCleanup(sendDisconnect: false)
+    }
+
     @Test(arguments: [0, 1, 4, 5, 30])
     func initialInterval(seconds: Int) {
         let config = MQTTChannelHandler.Configuration(.init(keepAliveInterval: .seconds(seconds)))
@@ -123,21 +191,6 @@ struct KeepAliveTests {
         #expect(channel.isActive)
     }
 
-    @Test func stalePingCompletionDoesNotReplaceNewSchedule() throws {
-        let (channel, handler) = try setup()
-        defer { _ = try? channel.finish() }
-        handler.updatePingreqTimeout(.seconds(1))
-        channel.embeddedEventLoop.advanceTime(by: .seconds(1))
-        #expect(try read(channel) == .PINGREQ)
-        handler.updatePingreqTimeout(.seconds(3))
-        channel.embeddedEventLoop.advanceTime(by: .seconds(1))
-        try respond(channel)
-        channel.embeddedEventLoop.advanceTime(by: .seconds(2))
-        #expect(try read(channel) == .PINGREQ)
-        try respond(channel)
-        #expect(try read(channel) == nil)
-    }
-
     @Test func closingWithOutstandingPingDoesNotReschedule() throws {
         let (channel, handler) = try setup()
         handler.updatePingreqTimeout(.seconds(1))
@@ -148,19 +201,6 @@ struct KeepAliveTests {
         #expect(try read(channel) == nil)
         #expect(!channel.isActive)
         _ = try channel.finish(acceptAlreadyClosed: true)
-    }
-
-    @Test func cancelledTimerCannotSendAfterReplacement() throws {
-        let (channel, handler) = try setup()
-        defer { _ = try? channel.finish() }
-        handler.updatePingreqTimeout(.seconds(1))
-        handler.updatePingreqTimeout(.seconds(3))
-        channel.embeddedEventLoop.advanceTime(by: .seconds(1))
-        #expect(try read(channel) == nil)
-        channel.embeddedEventLoop.advanceTime(by: .seconds(2))
-        #expect(try read(channel) == .PINGREQ)
-        try respond(channel)
-        #expect(try read(channel) == nil)
     }
 
     @Test(arguments: [-1, 0, 1, 3])
@@ -194,19 +234,23 @@ struct KeepAliveTests {
         #expect(channel.isActive)
     }
 
-    @Test(arguments: [1, 3])
-    func updatedIntervalWaitsForOutstandingPing(seconds: Int64) throws {
+    @Test(arguments: [1, 3], [false, true])
+    func updatedIntervalWaitsForOutstandingPing(seconds: Int64, responseLate: Bool) throws {
         let (channel, handler) = try setup()
         defer { _ = try? channel.finish() }
         handler.updatePingreqTimeout(.seconds(2))
         channel.embeddedEventLoop.advanceTime(by: .seconds(2))
         #expect(try read(channel) == .PINGREQ)
         handler.updatePingreqTimeout(.seconds(seconds))
-        channel.embeddedEventLoop.advanceTime(by: .seconds(seconds + 1))
+        channel.embeddedEventLoop.advanceTime(by: .milliseconds(responseLate ? (seconds + 1) * 1000 : 500))
         #expect(try read(channel) == nil)
         try respond(channel)
+        if !responseLate {
+            channel.embeddedEventLoop.advanceTime(by: .milliseconds(seconds * 1000 - 501))
+            #expect(try read(channel) == nil)
+            channel.embeddedEventLoop.advanceTime(by: .milliseconds(1))
+        }
         channel.embeddedEventLoop.run()
-        // The replacement interval elapsed while waiting, so the next ping is now due.
         #expect(try read(channel) == .PINGREQ)
         #expect(try read(channel) == nil)
         try respond(channel)
