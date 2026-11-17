@@ -288,7 +288,8 @@ extension MQTTChannelHandler {
         mutating func schedulePingReq() -> SchedulePingReqAction {
             switch consume self.state {
             case .uninitialized:
-                preconditionFailure("Cannot schedule PINGREQ when uninitialized")
+                self = .uninitialized
+                return .doNothing
             case .initialized(let state):
                 self = .initialized(state)
                 return .schedule(state.context)

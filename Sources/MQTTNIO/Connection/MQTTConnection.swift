@@ -928,9 +928,11 @@ public final actor MQTTConnection: Sendable {
         }
 
         for property in connack.properties.properties {
-            // alter pingreq interval based on session expiry returned from server
-            if case .serverKeepAlive(let keepAliveInterval) = property {
-                let pingTimeout = TimeAmount.seconds(max(Int64(keepAliveInterval) - 5, 5))
+            // Apply the negotiated keepalive before scheduling the next ping.
+            if case .serverKeepAlive(let keepAliveInterval) = property,
+                case .useServerKeepAlive = self.configuration.pingConfiguration.base
+            {
+                let pingTimeout: TimeAmount? = keepAliveInterval == 0 ? nil : .seconds(max(Int64(keepAliveInterval) - 5, 1))
                 self.channelHandler.updatePingreqTimeout(pingTimeout)
             }
             // client identifier
