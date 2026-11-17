@@ -54,11 +54,11 @@ public final actor MQTTConnection: Sendable {
     let commonSubscribeSpanAttributes: SpanAttributes
     #endif
 
-    /// The successful acknowledgement from the direct CONNECT/CONNACK path.
+    /// Properties the server returned in a successful CONNACK.
     ///
-    /// MQTT 3.1.1 acknowledgements have an empty properties collection and a success reason.
-    /// The value is nil until that path processes a successful CONNACK.
-    public private(set) var connectAcknowledgement: MQTTConnackV5?
+    /// These are the server's negotiated values, such as Receive Maximum, Maximum Packet Size
+    /// or Server Keep Alive. They are empty for MQTT 3.1.1, which has no CONNACK properties.
+    public private(set) var connackProperties: MQTTProperties = .init()
 
     var connectionParameters = ConnectionParameters()
 
@@ -964,11 +964,7 @@ public final actor MQTTConnection: Sendable {
                 self.channelHandler.subscriptionIdentifiersAvailable = value != 0
             }
         }
-        self.connectAcknowledgement = MQTTConnackV5(
-            sessionPresent: connack.sessionPresent,
-            reason: MQTTReasonCode(rawValue: connack.returnCode) ?? .unrecognisedReason,
-            properties: connack.properties
-        )
+        self.connackProperties = connack.properties
         return connack
     }
 
