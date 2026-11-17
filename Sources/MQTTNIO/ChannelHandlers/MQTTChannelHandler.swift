@@ -53,7 +53,6 @@ final class MQTTChannelHandler: ChannelDuplexHandler {
     private var decoder: NIOSingleStepByteToMessageProcessor<ByteToMQTTMessageDecoder>
     private let logger: Logger
     private let configuration: Configuration
-    private var hasInboundError = false
 
     private var pingreqTimeout: TimeAmount?
     private var lastPingreqEventTime: NIODeadline
@@ -147,7 +146,7 @@ final class MQTTChannelHandler: ChannelDuplexHandler {
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        guard !self.hasInboundError else { return }
+        guard !self.stateMachine.isClosed() else { return }
         let buffer = self.unwrapInboundIn(data)
         do {
             try self.decoder.process(buffer: buffer) { message in
@@ -183,29 +182,9 @@ final class MQTTChannelHandler: ChannelDuplexHandler {
             }
         } catch {
             self.logger.error("Error processing MQTT message", metadata: ["mqtt_error": .string("\(error)")])
-            self.hasInboundError = true
-            // Send the MQTT 5 error response before notifying waiting connection tasks.
-            // Even if the peer's outgoing limit prevents the response, close the connection.
-            let disconnect: EventLoopFuture<Void>?
-            if self.configuration.version == .v5_0, case MQTTError.packetTooLarge = error {
-                disconnect = context.channel.writeAndFlush(MQTTDisconnectPacket(reason: .packetTooLarge))
-            } else {
-                disconnect = nil
-            }
             self.failTasksAndCloseSubscriptions(with: error)
             context.fireErrorCaught(error)
-            if let disconnect {
-                let closeContext = NIOLoopBound(context, eventLoop: context.eventLoop)
-                let closeDeadline = context.eventLoop.scheduleTask(in: self.configuration.timeout) {
-                    closeContext.value.close(promise: nil)
-                }
-                disconnect.assumeIsolated().whenComplete { _ in
-                    closeDeadline.cancel()
-                    context.close(promise: nil)
-                }
-            } else {
-                context.close(promise: nil)
-            }
+            context.close(promise: nil)
         }
     }
 
@@ -565,7 +544,7 @@ final class MQTTChannelHandler: ChannelDuplexHandler {
 }
 
 extension MQTTChannelHandler.Configuration {
-    init(_ other: MQTTConnectionConfiguration) {
+    init(_ other: MQTTConnectionConfiguration) throws {
         self.pingInterval =
             switch other.pingConfiguration.base {
             case .useServerKeepAlive:
@@ -580,6 +559,7 @@ extension MQTTChannelHandler.Configuration {
         if case .v5_0(let properties, _, _, _) = other.versionConfiguration {
             for property in properties {
                 if case .maximumPacketSize(let size) = property {
+                    guard size > 0, self.maximumIncomingPacketSize == nil else { throw MQTTPacketError.badParameter }
                     self.maximumIncomingPacketSize = Int(clamping: size)
                 }
             }

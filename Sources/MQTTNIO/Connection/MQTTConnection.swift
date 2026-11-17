@@ -559,6 +559,7 @@ public final actor MQTTConnection: Sendable {
 
         let channelPromise = eventLoop.makePromise(of: (any Channel).self)
         do {
+            let channelConfiguration = try MQTTChannelHandler.Configuration(configuration)
             let connect = try Self._getBootstrap(configuration: configuration, eventLoopGroup: eventLoop, host: host, logger: logger)
                 .connectTimeout(.init(configuration.connectTimeout))
                 .channelInitializer { channel in
@@ -577,10 +578,10 @@ public final actor MQTTConnection: Sendable {
                                 webSocketConfiguration: webSocketConfiguration,
                                 upgradePromise: promise
                             ) {
-                                try self._setupChannel(channel, configuration: configuration, session: session, logger: logger)
+                                try self._setupChannel(channel, configuration: channelConfiguration, session: session, logger: logger)
                             }
                         } else {
-                            try self._setupChannel(channel, configuration: configuration, session: session, logger: logger)
+                            try self._setupChannel(channel, configuration: channelConfiguration, session: session, logger: logger)
                         }
                         return eventLoop.makeSucceededVoidFuture()
                     } catch {
@@ -657,11 +658,12 @@ public final actor MQTTConnection: Sendable {
         logger: Logger
     ) -> EventLoopFuture<MQTTConnection> {
         do {
+            let channelConfiguration = try MQTTChannelHandler.Configuration(configuration)
             return channel.connect(to: try SocketAddress(ipAddress: "127.0.0.1", port: 1883)).flatMap {
                 channel.eventLoop.makeCompletedFuture {
                     let handler = try self._setupChannel(
                         channel,
-                        configuration: configuration,
+                        configuration: channelConfiguration,
                         session: session,
                         logger: logger
                     )
@@ -682,13 +684,13 @@ public final actor MQTTConnection: Sendable {
     @discardableResult
     private static func _setupChannel(
         _ channel: any Channel,
-        configuration: MQTTConnectionConfiguration,
+        configuration: MQTTChannelHandler.Configuration,
         session: MQTTSessionStorage,
         logger: Logger
     ) throws -> MQTTChannelHandler {
         channel.eventLoop.assertInEventLoop()
         let mqttChannelHandler = MQTTChannelHandler(
-            configuration: MQTTChannelHandler.Configuration(configuration),
+            configuration: configuration,
             eventLoop: channel.eventLoop,
             session: session,
             logger: logger

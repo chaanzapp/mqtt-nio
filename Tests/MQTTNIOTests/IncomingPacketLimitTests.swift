@@ -9,43 +9,16 @@ import Testing
 @testable import MQTTNIO
 
 struct IncomingPacketLimitTests {
-    private final class WithheldWrite: ChannelOutboundHandler {
-        typealias OutboundIn = ByteBuffer
-        var writes = 0
-        var pending: EventLoopPromise<Void>?
+    private final class ReentrantInputOnError: ChannelInboundHandler {
+        typealias InboundIn = ByteBuffer
+        var errorCount = 0
 
-        func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
-            self.writes += 1
-            self.pending = promise
+        func errorCaught(context: ChannelHandlerContext, error: any Error) {
+            self.errorCount += 1
+            // Error notification happens before close; new input must already be ignored.
+            context.channel.pipeline.fireChannelRead(ByteBuffer(bytes: [0xD0, 0x00]))
+            context.fireErrorCaught(error)
         }
-    }
-
-    @Test(arguments: [false, true])
-    func noFurtherInputWhileDisconnectFlushIsPending(completeWrite: Bool) throws {
-        let loop = EmbeddedEventLoop()
-        let handler = MQTTChannelHandler(
-            configuration: .init(.init(versionConfiguration: .v5_0(connectProperties: [.maximumPacketSize(16)]), timeout: .seconds(1))),
-            eventLoop: loop,
-            session: .init(clientID: "pending-close", logger: Logger(label: "pending-close")),
-            logger: Logger(label: "pending-close")
-        )
-        let withheld = WithheldWrite()
-        let channel = EmbeddedChannel(handlers: [withheld, handler], loop: loop)
-        try channel.connect(to: .init(ipAddress: "127.0.0.1", port: 1883)).wait()
-        #expect(throws: MQTTError.packetTooLarge) { try channel.writeInbound(ByteBuffer(bytes: [0x20, 0x10])) }
-        #expect(channel.isActive)
-        try channel.writeInbound(ByteBuffer(bytes: [0xD0, 0x00]))
-        try channel.writeInbound(ByteBuffer(bytes: [0x20, 0x10]))
-        #expect(withheld.writes == 1)
-        let pending = try #require(withheld.pending)
-        if completeWrite {
-            pending.succeed(())
-        } else {
-            loop.advanceTime(by: .seconds(1))
-            pending.fail(ChannelError.ioOnClosedChannel)
-        }
-        #expect(!channel.isActive)
-        _ = try channel.finish(acceptAlreadyClosed: true)
     }
 
     @Test func oversizedHeaderRejectedWithoutBody() {
@@ -97,42 +70,74 @@ struct IncomingPacketLimitTests {
         }
     }
 
-    @Test func configurationUsesConnectLimitOnly() {
-        let configured = MQTTChannelHandler.Configuration(
+    @Test func configurationUsesConnectLimitOnly() throws {
+        let configured = try MQTTChannelHandler.Configuration(
             .init(
                 versionConfiguration: .v5_0(
                     connectProperties: [.userProperty("test", "value"), .maximumPacketSize(4096)])
             )
         )
         #expect(configured.maximumIncomingPacketSize == 4096)
-        let largest = MQTTChannelHandler.Configuration(.init(versionConfiguration: .v5_0(connectProperties: [.maximumPacketSize(.max)])))
+        let largest = try MQTTChannelHandler.Configuration(.init(versionConfiguration: .v5_0(connectProperties: [.maximumPacketSize(.max)])))
         #expect(largest.maximumIncomingPacketSize == Int(clamping: UInt32.max))
-        #expect(MQTTChannelHandler.Configuration(.init(versionConfiguration: .v5_0())).maximumIncomingPacketSize == nil)
-        #expect(MQTTChannelHandler.Configuration(.init()).maximumIncomingPacketSize == nil)
+        #expect(try MQTTChannelHandler.Configuration(.init(versionConfiguration: .v5_0())).maximumIncomingPacketSize == nil)
+        #expect(try MQTTChannelHandler.Configuration(.init()).maximumIncomingPacketSize == nil)
+    }
+
+    @Test(arguments: [[UInt32(0)], [16, 16], [16, 32]])
+    func invalidConnectLimitRejectedBeforeSending(sizes: [UInt32]) async throws {
+        let configuration = MQTTConnectionConfiguration(
+            versionConfiguration: .v5_0(connectProperties: .init(sizes.map { .maximumPacketSize($0) }))
+        )
+        #expect(throws: MQTTPacketError.badParameter) {
+            try MQTTChannelHandler.Configuration(configuration)
+        }
+        let channel = NIOAsyncTestingChannel()
+        await #expect(throws: MQTTPacketError.badParameter) {
+            try await MQTTConnection.setupChannelAndConnect(
+                channel,
+                configuration: configuration,
+                session: .init(clientID: "invalid-limit", logger: Logger(label: "invalid-limit"))
+            )
+        }
+        #expect(!channel.isActive)
+        #expect(try await channel.readOutbound(as: ByteBuffer.self) == nil)
+        try await channel.close().get()
     }
 
     @Test(arguments: [false, true])
-    func configuredLimitClosesChannelWithDisconnect(responseFits: Bool) throws {
+    func invalidConnectLimitRejectedBeforeOpeningTransport(webSocket: Bool) async {
+        await #expect(throws: MQTTPacketError.badParameter) {
+            try await MQTTConnection.withConnection(
+                address: .unixDomainSocket(path: "/tmp/mqtt-pr2-nonexistent.sock"),
+                configuration: .init(
+                    versionConfiguration: .v5_0(connectProperties: [.maximumPacketSize(0)]),
+                    transport: webSocket ? .webSocket(.init()) : .tcp()
+                )
+            ) { _ in
+                Issue.record("Invalid configuration reached the connection operation")
+            }
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func invalidHeaderClosesChannelWithoutDisconnect(malformedLength: Bool) throws {
         let loop = EmbeddedEventLoop()
         let handler = MQTTChannelHandler(
-            configuration: .init(.init(versionConfiguration: .v5_0(connectProperties: [.maximumPacketSize(16)]))),
+            configuration: try .init(.init(versionConfiguration: .v5_0(connectProperties: [.maximumPacketSize(16)]))),
             eventLoop: loop,
             session: .init(clientID: "packet-limit", logger: Logger(label: "packet-limit")),
             logger: Logger(label: "packet-limit")
         )
-        handler.maxPacketSize = responseFits ? .max : 1
-        let channel = EmbeddedChannel(handler: handler, loop: loop)
+        let reentrantInput = ReentrantInputOnError()
+        let channel = EmbeddedChannel(handlers: [handler, reentrantInput], loop: loop)
         try channel.connect(to: .init(ipAddress: "127.0.0.1", port: 1883)).wait()
-        #expect(throws: MQTTError.packetTooLarge) { try channel.writeInbound(ByteBuffer(bytes: [0x20, 0x10])) }
-        if responseFits {
-            var bytes = try #require(try channel.readOutbound(as: ByteBuffer.self))
-            let packet = try MQTTIncomingPacket.read(from: &bytes)
-            #expect(packet.type == .DISCONNECT)
-            #expect(try MQTTDisconnectPacket.read(version: .v5_0, from: packet).reason == .packetTooLarge)
-        } else {
-            #expect(try channel.readOutbound(as: ByteBuffer.self) == nil)
-        }
+        let bytes: [UInt8] = malformedLength ? [0x20, 0x80, 0x80, 0x80, 0x80] : [0x20, 0x10]
+        let error: MQTTError = malformedLength ? .decodeError : .packetTooLarge
+        #expect(throws: error) { try channel.writeInbound(ByteBuffer(bytes: bytes)) }
+        #expect(reentrantInput.errorCount == 1)
         #expect(!channel.isActive)
+        #expect(try channel.readOutbound(as: ByteBuffer.self) == nil)
         _ = try channel.finish(acceptAlreadyClosed: true)
     }
 }
