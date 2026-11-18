@@ -1,15 +1,13 @@
-# Chaanz integration branch
+# Chaanz MQTTNIO integration
 
-Based on upstream `c93d67fbad5b827a30ab356cd8b7c64f85c63763` (the 3.x development line, newer than 3.0.0-rc.1).
+The `chaanz/3-fixes` branch follows upstream `0247a08` with two changes:
 
-The upstream version already preserves negative PUBACK properties and enforces outgoing packet limits. Those v2 patches are removed.
+- [#1](https://github.com/chaanzapp/mqtt-nio/pull/1): convert Server Keep Alive to
+  `Int64` before subtraction, preventing unsigned underflow.
+- [#3](https://github.com/chaanzapp/mqtt-nio/pull/3): expose successful CONNACK
+  properties through `MQTTConnection.connackProperties`.
 
-Remaining changes:
-
-- Handle zero and short keepalive intervals without unsigned underflow; reschedule negotiated pings and invalidate callbacks from an older schedule.
-- Enforce the CONNECT Maximum Packet Size at the incoming fixed header, before waiting for its body; reject variable-length integers longer than four bytes. Oversize input closes the connection.
-- Expose the successful CONNACK so a caller-owned queue can honour Receive Maximum and inspect Session Present.
-
-`DeliveryLimitsTests` covers the decoder boundaries, keepalive values and CONNACK access. The Analytics sender/receiver interoperability suite additionally exercises real TLS, negotiated one-second pings and one outstanding publish, packet limits and negative PUBACK metadata.
-
-This branch is for the Chaanz integration. It is not an upstream submission.
+The b.sure sender uses the properties to respect Receive Maximum. Its contract
+requires Server Keep Alive to be omitted or at least 30 seconds. The crash fix
+does not change upstream timer behavior or support shorter negotiated intervals.
+The former custom timer and inbound packet-limit changes have been removed.

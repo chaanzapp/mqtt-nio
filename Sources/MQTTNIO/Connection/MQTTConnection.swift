@@ -54,8 +54,11 @@ public final actor MQTTConnection: Sendable {
     let commonSubscribeSpanAttributes: SpanAttributes
     #endif
 
-    /// The successful CONNACK, including negotiated limits needed by caller-owned queues.
-    public private(set) var connectAcknowledgement: MQTTConnackV5?
+    /// Properties the server returned in a successful CONNACK.
+    ///
+    /// These are the server's negotiated values, such as Receive Maximum, Maximum Packet Size
+    /// or Server Keep Alive. They are empty for MQTT 3.1.1, which has no CONNACK properties.
+    public private(set) var connackProperties: MQTTProperties = .init()
 
     var connectionParameters = ConnectionParameters()
 
@@ -933,7 +936,7 @@ public final actor MQTTConnection: Sendable {
         for property in connack.properties.properties {
             // alter pingreq interval based on session expiry returned from server
             if case .serverKeepAlive(let keepAliveInterval) = property {
-                let pingTimeout: TimeAmount? = keepAliveInterval == 0 ? nil : .seconds(max(Int64(keepAliveInterval) - 5, 1))
+                let pingTimeout = TimeAmount.seconds(max(Int64(keepAliveInterval) - 5, 5))
                 self.channelHandler.updatePingreqTimeout(pingTimeout)
             }
             // client identifier
@@ -956,12 +959,12 @@ public final actor MQTTConnection: Sendable {
             if case .topicAliasMaximum(let max) = property {
                 self.connectionParameters.maxTopicAlias = max
             }
+            // supports subscription identifiers
+            if case .subscriptionIdentifierAvailable(let value) = property {
+                self.channelHandler.subscriptionIdentifiersAvailable = value != 0
+            }
         }
-        self.connectAcknowledgement = MQTTConnackV5(
-            sessionPresent: connack.sessionPresent,
-            reason: MQTTReasonCode(rawValue: connack.returnCode) ?? .unrecognisedReason,
-            properties: connack.properties
-        )
+        self.connackProperties = connack.properties
         return connack
     }
 

@@ -60,7 +60,6 @@ enum MQTTSerializer {
             if byte & 0x80 == 0 {
                 break
             }
-            guard shift < 21 else { throw MQTTError.decodeError }
             shift += 7
         } while true
         return value
